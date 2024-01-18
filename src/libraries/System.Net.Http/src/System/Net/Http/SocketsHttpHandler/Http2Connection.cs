@@ -138,7 +138,8 @@ namespace System.Net.Http
             _incomingBuffer = new ArrayBuffer(initialSize: 0, usePool: true);
             _outgoingBuffer = new ArrayBuffer(initialSize: 0, usePool: true);
 
-            _hpackDecoder = new HPackDecoder(maxHeadersLength: pool.Settings.MaxResponseHeadersByteLength);
+            _hpackDecoder = new HPackDecoder(maxDynamicTableSize: (int)_pool.Settings._http2Settings.Settings.GetValueOrDefault(Http2Settings.SettingId.HeaderTableSize, (uint)HPackDecoder.DefaultHeaderTableSize),
+                maxHeadersLength: pool.Settings.MaxResponseHeadersByteLength);
 
             _httpStreams = new Dictionary<int, Http2Stream>();
 
@@ -194,7 +195,7 @@ namespace System.Net.Http
             try
             {
                 _outgoingBuffer.EnsureAvailableSpace(Http2ConnectionPreface.Length +
-                    FrameHeader.Size + FrameHeader.SettingLength +
+                    FrameHeader.Size + (FrameHeader.SettingLength * _pool.Settings._http2Settings.Settings.Count) +
                     FrameHeader.Size + FrameHeader.WindowUpdateLength);
 
                 // Send connection preface
@@ -202,21 +203,22 @@ namespace System.Net.Http
                 _outgoingBuffer.Commit(Http2ConnectionPreface.Length);
 
                 // Send SETTINGS frame.  Disable push promise & set initial window size.
-                FrameHeader.WriteTo(_outgoingBuffer.AvailableSpan, 2 * FrameHeader.SettingLength, FrameType.Settings, FrameFlags.None, streamId: 0);
+                FrameHeader.WriteTo(_outgoingBuffer.AvailableSpan, _pool.Settings._http2Settings.Settings.Count * FrameHeader.SettingLength, FrameType.Settings, FrameFlags.None, streamId: 0);
                 _outgoingBuffer.Commit(FrameHeader.Size);
-                BinaryPrimitives.WriteUInt16BigEndian(_outgoingBuffer.AvailableSpan, (ushort)SettingId.EnablePush);
-                _outgoingBuffer.Commit(2);
-                BinaryPrimitives.WriteUInt32BigEndian(_outgoingBuffer.AvailableSpan, 0);
-                _outgoingBuffer.Commit(4);
-                BinaryPrimitives.WriteUInt16BigEndian(_outgoingBuffer.AvailableSpan, (ushort)SettingId.InitialWindowSize);
-                _outgoingBuffer.Commit(2);
-                BinaryPrimitives.WriteUInt32BigEndian(_outgoingBuffer.AvailableSpan, (uint)_pool.Settings._initialHttp2StreamWindowSize);
-                _outgoingBuffer.Commit(4);
+
+                foreach(var setting in _pool.Settings._http2Settings.Settings)
+                {
+                    BinaryPrimitives.WriteUInt16BigEndian(_outgoingBuffer.AvailableSpan, (ushort)setting.Key);
+                    _outgoingBuffer.Commit(2);
+                    BinaryPrimitives.WriteUInt32BigEndian(_outgoingBuffer.AvailableSpan, setting.Value);
+                    _outgoingBuffer.Commit(4);
+                }
 
                 // The connection-level window size can not be initialized by SETTINGS frames:
                 // https://datatracker.ietf.org/doc/html/rfc7540#section-6.9.2
                 // Send an initial connection-level WINDOW_UPDATE to setup the desired ConnectionWindowSize:
-                uint windowUpdateAmount = ConnectionWindowSize - DefaultInitialWindowSize;
+                uint windowUpdateAmount = _pool.Settings._http2Settings.WindowSize;
+
                 if (NetEventSource.Log.IsEnabled()) Trace($"Initial connection-level WINDOW_UPDATE, windowUpdateAmount={windowUpdateAmount}");
                 FrameHeader.WriteTo(_outgoingBuffer.AvailableSpan, FrameHeader.WindowUpdateLength, FrameType.WindowUpdate, FrameFlags.None, streamId: 0);
                 _outgoingBuffer.Commit(FrameHeader.Size);
@@ -226,7 +228,9 @@ namespace System.Net.Http
                 // Processing the incoming frames before sending the client preface and SETTINGS is necessary when using a NamedPipe as a transport.
                 // If the preface and SETTINGS coming from the server are not read first the below WriteAsync and the ProcessIncomingFramesAsync fall into a deadlock.
                 _ = ProcessIncomingFramesAsync();
+
                 await _stream.WriteAsync(_outgoingBuffer.ActiveMemory, cancellationToken).ConfigureAwait(false);
+
                 _rttEstimator.OnInitialSettingsSent();
                 _outgoingBuffer.ClearAndReturnBuffer();
             }
@@ -1477,6 +1481,9 @@ namespace System.Net.Http
         {
             if (NetEventSource.Log.IsEnabled()) Trace("");
 
+            if (request.Priority.HasValue)
+                WriteBytes(new byte[] { 128, 0, 0, 0, request.Priority.Value }, ref headerBuffer);
+
             // HTTP2 does not support Transfer-Encoding: chunked, so disable this on the request.
             if (request.HasHeaders && request.Headers.TransferEncodingChunked == true)
             {
@@ -1484,41 +1491,57 @@ namespace System.Net.Http
             }
 
             HttpMethod normalizedMethod = HttpMethod.Normalize(request.Method);
-
-            // Method is normalized so we can do reference equality here.
-            if (ReferenceEquals(normalizedMethod, HttpMethod.Get))
-            {
-                WriteIndexedHeader(H2StaticTable.MethodGet, ref headerBuffer);
-            }
-            else if (ReferenceEquals(normalizedMethod, HttpMethod.Post))
-            {
-                WriteIndexedHeader(H2StaticTable.MethodPost, ref headerBuffer);
-            }
-            else
-            {
-                WriteIndexedHeader(H2StaticTable.MethodGet, normalizedMethod.Method, ref headerBuffer);
-            }
-
-            WriteIndexedHeader(_pool.IsSecure ? H2StaticTable.SchemeHttps : H2StaticTable.SchemeHttp, ref headerBuffer);
-
-            if (request.HasHeaders && request.Headers.Host is string host)
-            {
-                WriteIndexedHeader(H2StaticTable.Authority, host, ref headerBuffer);
-            }
-            else
-            {
-                WriteBytes(_pool._http2EncodedAuthorityHostHeader, ref headerBuffer);
-            }
-
             Debug.Assert(request.RequestUri != null);
-            string pathAndQuery = request.RequestUri.PathAndQuery;
-            if (pathAndQuery == "/")
+
+            var order = _pool.Settings._http2Settings.HeaderOrder;
+
+            foreach (var header in order)
             {
-                WriteIndexedHeader(H2StaticTable.PathSlash, ref headerBuffer);
-            }
-            else
-            {
-                WriteIndexedHeader(H2StaticTable.PathSlash, pathAndQuery, ref headerBuffer);
+                switch (header)
+                {
+                    case Http2Settings.Headers.Method:
+                        // Method is normalized so we can do reference equality here.
+                        if (ReferenceEquals(normalizedMethod, HttpMethod.Get))
+                        {
+                            WriteIndexedHeader(H2StaticTable.MethodGet, ref headerBuffer);
+                        }
+                        else if (ReferenceEquals(normalizedMethod, HttpMethod.Post))
+                        {
+                            WriteIndexedHeader(H2StaticTable.MethodPost, ref headerBuffer);
+                        }
+                        else
+                        {
+                            WriteIndexedHeader(H2StaticTable.MethodGet, normalizedMethod.Method, ref headerBuffer);
+                        }
+                        break;
+
+                    case Http2Settings.Headers.Authority:
+                        if (request.HasHeaders && request.Headers.Host is string host)
+                        {
+                            WriteIndexedHeader(H2StaticTable.Authority, host, ref headerBuffer);
+                        }
+                        else
+                        {
+                            WriteBytes(_pool._http2EncodedAuthorityHostHeader, ref headerBuffer);
+                        }
+                        break;
+
+                    case Http2Settings.Headers.Scheme:
+                        WriteIndexedHeader(_pool.IsSecure ? H2StaticTable.SchemeHttps : H2StaticTable.SchemeHttp, ref headerBuffer);
+                        break;
+
+                    case Http2Settings.Headers.Path:
+                        string pathAndQuery = request.RequestUri.PathAndQuery;
+                        if (pathAndQuery == "/")
+                        {
+                            WriteIndexedHeader(H2StaticTable.PathSlash, ref headerBuffer);
+                        }
+                        else
+                        {
+                            WriteIndexedHeader(H2StaticTable.PathSlash, pathAndQuery, ref headerBuffer);
+                        }
+                        break;
+                }
             }
 
             int headerListSize = 3 * HeaderField.RfcOverhead; // Method, Authority, Path
@@ -1645,7 +1668,7 @@ namespace System.Net.Http
                 // Start the write.  This serializes access to write to the connection, and ensures that HEADERS
                 // and CONTINUATION frames stay together, as they must do. We use the lock as well to ensure new
                 // streams are created and started in order.
-                await PerformWriteAsync(totalSize, (thisRef: this, http2Stream, headerBytes, endStream: (request.Content == null && !request.IsExtendedConnectRequest), mustFlush), static (s, writeBuffer) =>
+                await PerformWriteAsync(totalSize, (thisRef: this, http2Stream, headerBytes, endStream: (request.Content == null && !request.IsExtendedConnectRequest), mustFlush), (s, writeBuffer) =>
                 {
                     s.thisRef.AddStream(s.http2Stream);
 
@@ -1656,12 +1679,20 @@ namespace System.Net.Http
                     // Copy the HEADERS frame.
                     ReadOnlyMemory<byte> current, remaining;
                     (current, remaining) = SplitBuffer(s.headerBytes, FrameHeader.MaxPayloadLength);
+
                     FrameFlags flags = (remaining.Length == 0 ? FrameFlags.EndHeaders : FrameFlags.None);
                     flags |= (s.endStream ? FrameFlags.EndStream : FrameFlags.None);
+
+                    if (request.Priority.HasValue)
+                        flags |= FrameFlags.Priority;
+
                     FrameHeader.WriteTo(span, current.Length, FrameType.Headers, flags, s.http2Stream.StreamId);
+
                     span = span.Slice(FrameHeader.Size);
                     current.Span.CopyTo(span);
+
                     span = span.Slice(current.Length);
+
                     if (NetEventSource.Log.IsEnabled()) s.thisRef.Trace(s.http2Stream.StreamId, $"Wrote HEADERS frame. Length={current.Length}, flags={flags}");
 
                     // Copy CONTINUATION frames, if any.
@@ -1964,7 +1995,7 @@ namespace System.Net.Http
             ValidBits =     0b00101101
         }
 
-        private enum SettingId : ushort
+        public enum SettingId : ushort
         {
             HeaderTableSize = 0x1,
             EnablePush = 0x2,

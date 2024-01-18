@@ -23,7 +23,7 @@ namespace System.Net.Http
             public Http2StreamWindowManager(Http2Connection connection, Http2Stream stream)
             {
                 HttpConnectionSettings settings = connection._pool.Settings;
-                _streamWindowSize = settings._initialHttp2StreamWindowSize;
+                _streamWindowSize = (int)settings._http2Settings.WindowSize;
                 _deliveredBytes = 0;
                 _lastWindowUpdate = default;
 

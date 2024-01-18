@@ -274,22 +274,13 @@ namespace System.Net.Http
         /// Larger the values may lead to faster download speed, but potentially higher memory footprint.
         /// The property must be set to a value between 65535 and the configured maximum window size, which is 16777216 by default.
         /// </remarks>
-        public int InitialHttp2StreamWindowSize
+        public Http2Settings Http2Settings
         {
-            get => _settings._initialHttp2StreamWindowSize;
+            get => _settings._http2Settings;
             set
             {
-                if (value < HttpHandlerDefaults.DefaultInitialHttp2StreamWindowSize || value > GlobalHttpSettings.SocketsHttpHandler.MaxHttp2StreamWindowSize)
-                {
-                    string message = SR.Format(
-                        SR.net_http_http2_invalidinitialstreamwindowsize,
-                        HttpHandlerDefaults.DefaultInitialHttp2StreamWindowSize,
-                        GlobalHttpSettings.SocketsHttpHandler.MaxHttp2StreamWindowSize);
-
-                    throw new ArgumentOutOfRangeException(nameof(InitialHttp2StreamWindowSize), message);
-                }
                 CheckDisposedOrStarted();
-                _settings._initialHttp2StreamWindowSize = value;
+                _settings._http2Settings = value;
             }
         }
 
@@ -386,6 +377,16 @@ namespace System.Net.Http
             {
                 CheckDisposedOrStarted();
                 _settings._connectCallback = value;
+            }
+        }
+
+        public Func<SslClientAuthenticationOptions, Stream, CancellationToken, ValueTask<(Stream, SslApplicationProtocol)>>? SslCallback
+        {
+            get => _settings._sslCallback;
+            set
+            {
+                CheckDisposedOrStarted();
+                _settings._sslCallback = value;
             }
         }
 

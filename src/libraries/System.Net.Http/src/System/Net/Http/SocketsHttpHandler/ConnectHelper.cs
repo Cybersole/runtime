@@ -55,9 +55,12 @@ namespace System.Net.Http
             return sslOptions;
         }
 
-        public static async ValueTask<SslStream> EstablishSslConnectionAsync(SslClientAuthenticationOptions sslOptions, HttpRequestMessage request, bool async, Stream stream, CancellationToken cancellationToken)
+        public static async ValueTask<(Stream, SslApplicationProtocol)> EstablishSslConnectionAsync(SslClientAuthenticationOptions sslOptions, Func<SslClientAuthenticationOptions, Stream, CancellationToken, ValueTask<(Stream, SslApplicationProtocol)>>? callback, HttpRequestMessage request, bool async, Stream stream, CancellationToken cancellationToken)
         {
             sslOptions = SetUpRemoteCertificateValidationCallback(sslOptions, request);
+
+            if (callback != null)
+                return await callback(sslOptions, stream, cancellationToken).ConfigureAwait(false);
 
             SslStream sslStream = new SslStream(stream);
 
@@ -106,7 +109,7 @@ namespace System.Net.Http
                 throw CancellationHelper.CreateOperationCanceledException(null, cancellationToken);
             }
 
-            return sslStream;
+            return (sslStream, sslStream.NegotiatedApplicationProtocol);
         }
 
         [SupportedOSPlatform("windows")]

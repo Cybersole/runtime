@@ -60,12 +60,14 @@ namespace System.Net.Http
         internal bool _enableMultipleHttp2Connections;
 
         internal Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>>? _connectCallback;
+        internal Func<SslClientAuthenticationOptions, Stream, CancellationToken, ValueTask<(Stream, SslApplicationProtocol)>>? _sslCallback;
+
         internal Func<SocketsHttpPlaintextStreamFilterContext, CancellationToken, ValueTask<Stream>>? _plaintextStreamFilter;
 
         internal IDictionary<string, object?>? _properties;
 
         // Http2 flow control settings:
-        internal int _initialHttp2StreamWindowSize = HttpHandlerDefaults.DefaultInitialHttp2StreamWindowSize;
+        internal Http2Settings _http2Settings;
 
         internal ClientCertificateOption _clientCertificateOptions;
 
@@ -122,8 +124,9 @@ namespace System.Net.Http
                 _responseHeaderEncodingSelector = _responseHeaderEncodingSelector,
                 _enableMultipleHttp2Connections = _enableMultipleHttp2Connections,
                 _connectCallback = _connectCallback,
+                _sslCallback = _sslCallback,
                 _plaintextStreamFilter = _plaintextStreamFilter,
-                _initialHttp2StreamWindowSize = _initialHttp2StreamWindowSize,
+                _http2Settings = _http2Settings,
                 _activityHeadersPropagator = _activityHeadersPropagator,
                 _defaultCredentialsUsedForProxy = _proxy != null && (_proxy.Credentials == CredentialCache.DefaultCredentials || _defaultProxyCredentials == CredentialCache.DefaultCredentials),
                 _defaultCredentialsUsedForServer = _credentials == CredentialCache.DefaultCredentials,

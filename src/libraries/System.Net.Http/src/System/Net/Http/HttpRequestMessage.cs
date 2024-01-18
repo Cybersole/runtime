@@ -26,8 +26,11 @@ namespace System.Net.Http
 
         private HttpMethod _method;
         private Uri? _requestUri;
+        private string? _sslHostName;
+        private byte? _priority;
         private HttpRequestHeaders? _headers;
         private Version _version;
+        private IWebProxy? _proxy;
         private HttpVersionPolicy _versionPolicy;
         private HttpContent? _content;
         internal HttpRequestOptions? _options;
@@ -101,6 +104,36 @@ namespace System.Net.Http
             {
                 CheckDisposed();
                 _requestUri = value;
+            }
+        }
+
+        public string? SslHostName
+        {
+            get { return _sslHostName; }
+            set
+            {
+                CheckDisposed();
+                _sslHostName = value;
+            }
+        }
+
+        public IWebProxy? Proxy
+        {
+            get { return _proxy; }
+            set
+            {
+                CheckDisposed();
+                _proxy = value;
+            }
+        }
+
+        public byte? Priority
+        {
+            get { return _priority; }
+            set
+            {
+                CheckDisposed();
+                _priority = value;
             }
         }
 
